@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useRef } from "react";
 
 const PALETTE = ["#5B8DEF", "#34C795", "#E2793F", "#C77DFF", "#F2C14E", "#4EC5F1", "#F17EAA"];
 
@@ -16,6 +16,7 @@ const COLORS = {
   sell: "#E2793F",
   sellDim: "#4A2F1E",
   warn: "#F2C14E",
+  error: "#F2555A",
 };
 
 const fmtUSD = (n) =>
@@ -52,6 +53,8 @@ export default function PortfolioRebalancer() {
     cotacao: 5.35,
     objetivo: "reajustar",
   });
+  const [fileStatus, setFileStatus] = useState(null); // { type: 'success' | 'error', message }
+  const fileInputRef = useRef(null);
 
   const totalValue = useMemo(() => assets.reduce((s, a) => s + (Number(a.value) || 0), 0), [assets]);
   const totalTarget = useMemo(() => assets.reduce((s, a) => s + (Number(a.target) || 0), 0), [assets]);
@@ -147,6 +150,96 @@ export default function PortfolioRebalancer() {
     );
   }
 
+  function downloadFile(content, filename, mime) {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function exportJSON() {
+    const payload = {
+      formato: "rebalanceador-carteira",
+      versao: 1,
+      exportadoEm: new Date().toISOString(),
+      ativos: assets.map(({ name, value, target }) => ({ name, value, target })),
+      aporte,
+    };
+    const stamp = new Date().toISOString().slice(0, 10);
+    downloadFile(JSON.stringify(payload, null, 2), `carteira-${stamp}.json`, "application/json");
+    setFileStatus({ type: "success", message: "Carteira exportada em JSON." });
+  }
+
+  function csvEscape(value) {
+    const s = String(value ?? "");
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }
+
+  function exportCSV() {
+    const header = "Ativo,Valor (USD),Meta (%)";
+    const lines = assets.map((a) => [csvEscape(a.name), a.value, a.target].join(","));
+    const csv = [header, ...lines].join("\n");
+    const stamp = new Date().toISOString().slice(0, 10);
+    downloadFile(csv, `carteira-${stamp}.csv`, "text/csv");
+    setFileStatus({ type: "success", message: "Ativos exportados em CSV." });
+  }
+
+  function triggerImport() {
+    fileInputRef.current?.click();
+  }
+
+  function onImportFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // permite reimportar o mesmo arquivo depois
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result));
+        const rawAssets = Array.isArray(parsed?.ativos)
+          ? parsed.ativos
+          : Array.isArray(parsed?.assets)
+            ? parsed.assets
+            : null;
+        if (!rawAssets) throw new Error('arquivo sem a lista de ativos ("ativos").');
+        if (rawAssets.length === 0) throw new Error("nenhum ativo encontrado no arquivo.");
+
+        const importedAssets = rawAssets.map((a) => {
+          nextId += 1;
+          return {
+            id: nextId,
+            name: typeof a?.name === "string" && a.name.trim() ? a.name : "Ativo",
+            value: Number(a?.value) || 0,
+            target: Number(a?.target) || 0,
+          };
+        });
+
+        setAssets(importedAssets);
+
+        if (parsed?.aporte && typeof parsed.aporte === "object") {
+          setAporte((prev) => ({
+            valor: Number(parsed.aporte.valor) || 0,
+            moeda: parsed.aporte.moeda === "USD" ? "USD" : "BRL",
+            cotacao: Number(parsed.aporte.cotacao) || prev.cotacao,
+            objetivo: parsed.aporte.objetivo === "manter" ? "manter" : "reajustar",
+          }));
+        }
+
+        setFileStatus({ type: "success", message: `${importedAssets.length} ativo(s) importado(s) com sucesso.` });
+      } catch (err) {
+        setFileStatus({ type: "error", message: `Não foi possível importar: ${err.message}` });
+      }
+    };
+    reader.onerror = () => setFileStatus({ type: "error", message: "Não foi possível ler o arquivo." });
+    reader.readAsText(file);
+  }
+
   return (
     <div
       style={{
@@ -238,6 +331,53 @@ export default function PortfolioRebalancer() {
             metas ou manter a proporção atual.
           </p>
         </div>
+
+        {/* Salvar / importar */}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 20 }}>
+          <button className="rb-btn" onClick={exportJSON}>
+            ↓ Exportar JSON
+          </button>
+          <button className="rb-btn" onClick={exportCSV}>
+            ↓ Exportar CSV
+          </button>
+          <button className="rb-btn" onClick={triggerImport}>
+            ↑ Importar arquivo
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/json,.json"
+            onChange={onImportFile}
+            style={{ display: "none" }}
+          />
+        </div>
+
+        {fileStatus && (
+          <div
+            style={{
+              background: fileStatus.type === "success" ? COLORS.buyDim : "#3A1418",
+              border: `1px solid ${fileStatus.type === "success" ? "#1E4A3C" : "#5A2229"}`,
+              color: fileStatus.type === "success" ? COLORS.buy : COLORS.error,
+              fontSize: 13,
+              borderRadius: 8,
+              padding: "10px 14px",
+              marginBottom: 20,
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 12,
+            }}
+          >
+            <span>{fileStatus.message}</span>
+            <button
+              onClick={() => setFileStatus(null)}
+              aria-label="Fechar aviso"
+              style={{ background: "transparent", border: "none", color: "inherit", cursor: "pointer", fontSize: 16, lineHeight: 1, padding: 4, flexShrink: 0 }}
+            >
+              ×
+            </button>
+          </div>
+        )}
 
         {/* Summary strip */}
         <div
